@@ -2,224 +2,171 @@ name: Nightly QA Pipeline — BidDeed + ZoneWise
 
 on:
   schedule:
-    # 11PM EST = 4AM UTC
-    - cron: '0 4 * * *'
+    - cron: '0 4 * * *'  # 11PM EST = 4AM UTC
   workflow_dispatch:
-    inputs:
-      platform:
-        description: 'Platform to test (biddeed|zonewise|all)'
-        required: false
-        default: 'all'
 
 env:
   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
   SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-  LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
-  LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
-  LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GH_TOKEN: ${{ secrets.GH_TOKEN }}
+  ZONEWISE_AGENTS_URL: https://zonewise-agents.onrender.com
+  ZONEWISE_WEB_URL: https://zonewise.ai
 
 jobs:
-  # ─────────────────────────────────────────
-  # LAYER 1: BidDeed Unit + Integration Tests
-  # ─────────────────────────────────────────
-  biddeed-pytest:
-    name: BidDeed — pytest (unit + integration)
+  biddeed-unit:
+    name: BidDeed Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          repository: breverdbidder/biddeed-conversational-ai
-          token: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
+      - name: Install deps
+        run: pip install pytest pytest-json-report --break-system-packages
+      - name: Clone biddeed repo
         run: |
-          pip install -r requirements.txt --break-system-packages
-          pip install deepeval pytest-json-report --break-system-packages
-
+          git clone https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/breverdbidder/biddeed-conversational-ai.git biddeed
+          cp tests/biddeed/test_bid_logic.py biddeed/tests/
+          cp tests/biddeed/test_agent_integration.py biddeed/tests/
       - name: Run unit tests
+        working-directory: biddeed
         run: |
-          pytest tests/unit/ -v --tb=short \
-            --json-report --json-report-file=results_unit.json \
-            -m "unit" || true
-
-      - name: Run integration tests
-        run: |
-          pytest tests/integration/ -v --tb=short \
-            --json-report --json-report-file=results_integration.json \
-            -m "integration and not scraper" || true
-
+          python -m pytest tests/test_bid_logic.py tests/test_agent_integration.py \
+            -v --json-report --json-report-file=unit-results.json \
+            --tb=short -x || true
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: biddeed-pytest-results
-          path: results_*.json
+          name: biddeed-unit-results
+          path: biddeed/unit-results.json
 
-  # ─────────────────────────────────────────
-  # LAYER 2: BidDeed DeepEval Evals
-  # ─────────────────────────────────────────
   biddeed-deepeval:
-    name: BidDeed — DeepEval (LLM-as-judge)
+    name: BidDeed DeepEval Evals
     runs-on: ubuntu-latest
-    needs: biddeed-pytest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install deepeval
-        run: pip install deepeval --break-system-packages
-
-      - name: Run BidDeed eval suite
+      - name: Install deps
+        run: pip install deepeval pytest pytest-json-report anthropic --break-system-packages
+      - name: Clone biddeed repo
         run: |
-          deepeval test run tests/biddeed/evals/ \
-            --output-file results_biddeed_evals.json || true
-
+          git clone https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/breverdbidder/biddeed-conversational-ai.git biddeed
+          cp tests/biddeed/test_deepeval_evals.py biddeed/tests/
+      - name: Run DeepEval tests
+        working-directory: biddeed
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPEVAL_TELEMETRY_OPT_OUT: "YES"
+        run: |
+          python -m pytest tests/test_deepeval_evals.py \
+            -v --json-report --json-report-file=deepeval-results.json \
+            --tb=short || true
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: biddeed-deepeval-results
-          path: results_biddeed_evals.json
+          path: biddeed/deepeval-results.json
 
-  # ─────────────────────────────────────────
-  # LAYER 3: ZoneWise Agent Tests
-  # ─────────────────────────────────────────
-  zonewise-agent-tests:
-    name: ZoneWise — Agent Tests
+  zonewise-agents:
+    name: ZoneWise Agent Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          repository: breverdbidder/zonewise-agents
-          token: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
+      - name: Install deps
+        run: pip install pytest pytest-json-report httpx --break-system-packages
+      - name: Clone zonewise-agents repo
         run: |
-          pip install -r requirements.txt --break-system-packages
-          pip install deepeval agentevals pytest-json-report --break-system-packages
-
+          git clone https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/breverdbidder/zonewise-agents.git zagents
+          mkdir -p zagents/tests
+          cp tests/zonewise_agents/test_agent_health.py zagents/tests/
+          cp tests/zonewise_agents/test_langgraph_trajectory.py zagents/tests/
       - name: Run agent tests
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          pytest tests/ -v --tb=short \
-            --json-report --json-report-file=results_zonewise_agent.json || true
-
+          python -m pytest zagents/tests/ \
+            -v --json-report --json-report-file=agent-results.json \
+            --tb=short || true
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: zonewise-agent-results
-          path: results_zonewise_agent.json
+          path: agent-results.json
 
-  # ─────────────────────────────────────────
-  # LAYER 4: ZoneWise Playwright E2E
-  # ─────────────────────────────────────────
   zonewise-playwright:
-    name: ZoneWise — Playwright E2E
+    name: ZoneWise E2E Playwright
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          repository: breverdbidder/zonewise-web
-          token: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-
-      - name: Install dependencies
+      - name: Install Playwright
         run: |
-          npm ci
+          npm init -y
+          npm install @playwright/test
           npx playwright install chromium --with-deps
-
-      - name: Run E2E tests
+      - name: Copy E2E tests
         run: |
-          npx playwright test tests/e2e/ \
-            --reporter=json \
-            --output=playwright_results.json || true
-        env:
-          BASE_URL: https://zonewise.ai
-
+          cp tests/zonewise_web/e2e_zonewise.spec.ts .
+          cp tests/zonewise_web/playwright.config.ts .
+      - name: Run Playwright tests
+        run: npx playwright test --config=playwright.config.ts || true
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: zonewise-playwright-results
-          path: playwright_results.json
+          path: playwright-results.json
 
-  # ─────────────────────────────────────────
-  # LAYER 5: LangGraph Trajectory Validation
-  # ─────────────────────────────────────────
-  langgraph-trajectory:
-    name: LangGraph Trajectory Validation (agentevals)
+  aggregate-and-notify:
+    name: Aggregate Results + Telegram Report
     runs-on: ubuntu-latest
-    needs: [biddeed-pytest, zonewise-agent-tests]
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install agentevals
-        run: pip install agentevals langgraph anthropic --break-system-packages
-
-      - name: Run trajectory validation
-        run: python scripts/validate_trajectories.py
-
-  # ─────────────────────────────────────────
-  # FINAL: Aggregate Results → Supabase
-  # ─────────────────────────────────────────
-  aggregate-and-log:
-    name: Aggregate Results + Log to Supabase
-    runs-on: ubuntu-latest
-    needs:
-      - biddeed-pytest
-      - biddeed-deepeval
-      - zonewise-agent-tests
-      - zonewise-playwright
-      - langgraph-trajectory
+    needs: [biddeed-unit, biddeed-deepeval, zonewise-agents, zonewise-playwright]
     if: always()
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install deps
-        run: pip install supabase --break-system-packages
-
+        run: pip install supabase requests --break-system-packages
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./artifacts
-
-      - name: Aggregate + log to Supabase
-        run: python scripts/aggregate_results.py
-
-      - name: Auto-heal if failures detected
-        run: python scripts/trigger_healer.py
+          path: artifacts/
+      - name: Aggregate results + log to Supabase
         env:
-          HEAL_ENABLED: 'true'
-          MAX_HEAL_CYCLES: '3'
-
-      - name: Open GitHub Issue on critical failure
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/aggregate_results.py
+      - name: Send Telegram report
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/qa_notifier.py nightly
+      - name: Open issue on critical failure
         if: failure()
-        run: python scripts/open_issue_on_failure.py
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          gh issue create \
+            --title "🚨 QA Critical Failure $(date +'%Y-%m-%d')" \
+            --body "Nightly QA pipeline failed. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "qa-critical,ariel-review" \
+            --repo breverdbidder/qa-agentic-pipeline || true
