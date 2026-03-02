@@ -33,9 +33,12 @@ def parse_pytest_json(filepath: str) -> float | None:
         summary = data.get("summary", {})
         total = summary.get("total", 0)
         passed = summary.get("passed", 0)
-        if total == 0:
-            return None  # Not run
-        return passed / total
+        skipped = summary.get("skipped", 0)
+        if total == 0 or total == skipped:
+            return None  # Not run or all skipped
+        # Exclude skipped from denominator
+        ran = total - skipped
+        return passed / ran if ran > 0 else None
     except Exception as e:
         print(f"  Warning: {filepath}: {e}")
         return None
