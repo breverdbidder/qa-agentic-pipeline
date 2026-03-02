@@ -43,7 +43,7 @@ def get_latest_sentinel_run() -> Optional[dict]:
     )
     if result.data:
         row = result.data[0]
-        row["details"] = json.loads(row["details"]) if isinstance(row["details"], str) else row["details"]
+        row["details"] = json.loads(row.get("data", row.get("details", "{}"))) if isinstance(row.get("data", row.get("details")), str) else row.get("data", row.get("details", {}))
         return row
     return None
 
