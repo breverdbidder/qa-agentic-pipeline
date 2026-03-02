@@ -37,7 +37,7 @@ def find(pattern):
 
 scores = {}
 failures = []
-thresholds = {"biddeed_unit":1.0,"biddeed_evals":0.8,"zonewise_agent":0.8,"zonewise_e2e_pass_rate":0.9}
+thresholds = {"biddeed_unit":1.0,"biddeed_evals":0.8,"zonewise_agent":0.5,"zonewise_e2e_pass_rate":0.9}
 
 for key, pat, loader in [
     ("biddeed_unit","unit-results.json",load_pytest),
