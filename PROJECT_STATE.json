@@ -1,0 +1,69 @@
+{
+  "version": "1.0.0",
+  "created": "2026-03-01T00:00:00Z",
+  "last_updated": "2026-03-01T00:00:00Z",
+  "platforms": {
+    "biddeed": {
+      "repo": "breverdbidder/biddeed-conversational-ai",
+      "last_run_sha": null,
+      "last_run_date": null,
+      "last_status": "not_run",
+      "last_score": null
+    },
+    "zonewise_agents": {
+      "repo": "breverdbidder/zonewise-agents",
+      "last_run_sha": null,
+      "last_run_date": null,
+      "last_status": "not_run",
+      "last_score": null
+    },
+    "zonewise_web": {
+      "repo": "breverdbidder/zonewise-web",
+      "last_run_sha": null,
+      "last_run_date": null,
+      "last_status": "not_run",
+      "last_score": null
+    }
+  },
+  "qa_layers": {
+    "agentic_pipeline": {
+      "tool": "arize-phoenix + agentevals",
+      "status": "pending_setup",
+      "last_score": null
+    },
+    "nightly_regression": {
+      "tool": "deepeval + pytest",
+      "status": "pending_setup",
+      "last_score": null
+    },
+    "production_monitoring": {
+      "tool": "langfuse (self-hosted render)",
+      "status": "pending_deploy",
+      "langfuse_url": null
+    },
+    "ui_e2e": {
+      "tool": "playwright",
+      "status": "pending_setup",
+      "tests_written": 0,
+      "tests_passing": 0
+    },
+    "ai_code_testing": {
+      "tool": "claude-code-council + deepeval",
+      "status": "pending_setup",
+      "slash_commands_deployed": false
+    }
+  },
+  "heal_history": [],
+  "sentinel_runs": [],
+  "deployment_checklist": {
+    "arize_phoenix_local": false,
+    "langfuse_render_deployed": false,
+    "deepeval_biddeed_configured": false,
+    "deepeval_zonewise_configured": false,
+    "playwright_zonewise_web": false,
+    "agentevals_trajectories_defined": false,
+    "nightly_workflow_active": false,
+    "pr_gate_active": false,
+    "supabase_logging_verified": false
+  }
+}
