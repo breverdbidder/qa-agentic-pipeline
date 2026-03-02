@@ -1,99 +1,162 @@
 #!/usr/bin/env python3
-"""aggregate_results.py — QA Result Aggregator (v2)"""
-import os, json, glob
+"""
+aggregate_results.py — QA Results Aggregator
+Reads pytest JSON reports from artifacts/ directory
+Computes scores, logs to Supabase insights table
+"""
+import os, json, glob, sys
 from datetime import datetime, timezone
+from supabase import create_client
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL","https://mocerqjnksmhcjzxrewo.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY","")
-GITHUB_RUN_URL = os.environ.get("GITHUB_RUN_URL","")
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+GITHUB_RUN_URL = os.environ.get("GITHUB_RUN_URL", "")
 
-def load_pytest(f):
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+THRESHOLDS = {
+    "biddeed_unit":       1.0,
+    "biddeed_integration": 1.0,
+    "biddeed_evals":      0.8,
+    "zonewise_agent":     1.0,
+    "zonewise_e2e_pass_rate": 1.0,
+}
+
+def parse_pytest_json(filepath: str) -> float:
+    """Returns pass rate 0.0-1.0"""
     try:
-        data = json.load(open(f))
-        s = data.get("summary",{})
-        t = s.get("total",0)
-        p = s.get("passed",0)
-        sk = s.get("skipped",0)
-        # If all tests skipped (e.g. no API key), treat as neutral 1.0
-        if t == 0 or (sk == t):
-            return {"score":1.0,"passed":p,"total":t,"skipped":sk,"status":"skipped"}
-        return {"score":p/(t-sk) if (t-sk)>0 else 1.0,"passed":p,"total":t,"skipped":sk,"status":"pass" if p==(t-sk) else "fail"}
+        with open(filepath) as f:
+            data = json.load(f)
+        summary = data.get("summary", {})
+        total = summary.get("total", 0)
+        passed = summary.get("passed", 0)
+        if total == 0:
+            return 0.0
+        return passed / total
     except Exception as e:
-        print(f"  parse error {f}: {e}")
-        return {"score":0.0,"passed":0,"total":0,"status":"error"}
+        print(f"  Warning: Could not parse {filepath}: {e}")
+        return 0.0
 
-def load_playwright(f):
+def parse_playwright_json(filepath: str) -> float:
+    """Returns pass rate from Playwright JSON report"""
     try:
-        data = json.load(open(f))
-        s = data.get("stats",{})
-        exp = s.get("expected",0); tot = s.get("total",exp)
-        if tot == 0: return {"score":1.0,"status":"skipped"}
-        return {"score":exp/tot,"passed":exp,"total":tot,"status":"pass" if exp==tot else "fail"}
-    except: return {"score":0.0,"status":"error"}
+        with open(filepath) as f:
+            data = json.load(f)
+        suites = data.get("suites", [])
+        total, passed = 0, 0
+        def walk(suite):
+            nonlocal total, passed
+            for spec in suite.get("specs", []):
+                for test in spec.get("tests", []):
+                    total += 1
+                    if test.get("status") == "expected":
+                        passed += 1
+            for child in suite.get("suites", []):
+                walk(child)
+        for suite in suites:
+            walk(suite)
+        return (passed / total) if total > 0 else 0.0
+    except Exception as e:
+        print(f"  Warning: Could not parse Playwright JSON {filepath}: {e}")
+        return 0.0
 
-def find(pattern):
-    m = glob.glob(f"artifacts/**/{pattern}", recursive=True)
-    return m[0] if m else None
+def find_artifact(pattern: str) -> str | None:
+    matches = glob.glob(f"artifacts/**/{pattern}", recursive=True)
+    return matches[0] if matches else None
 
-scores = {}
-failures = []
-thresholds = {"biddeed_unit":1.0,"biddeed_evals":0.8,"zonewise_agent":0.5,"zonewise_e2e_pass_rate":0.9}
+def main():
+    print("📊 Aggregating QA results...")
+    
+    scores = {}
+    failures = []
 
-for key, pat, loader in [
-    ("biddeed_unit","unit-results.json",load_pytest),
-    ("biddeed_evals","deepeval-results.json",load_pytest),
-    ("zonewise_agent","agent-results.json",load_pytest),
-    ("zonewise_e2e_pass_rate","playwright-results.json",load_playwright),
-]:
-    f = find(pat)
-    if f:
-        r = loader(f)
-        scores[key] = r["score"]
-        note = " (skipped)" if r.get("status")=="skipped" else ""
-        print(f"  {key}: {r['score']*100:.0f}%{note} [{r.get('passed',0)}/{r.get('total',0)}]")
-        if r["score"] < thresholds[key]:
-            failures.append({"layer":key,"score":r["score"],"threshold":thresholds[key],"status":r.get("status","fail")})
+    # BidDeed unit + integration (single pytest run covers both)
+    unit_file = find_artifact("unit-results.json")
+    if unit_file:
+        score = parse_pytest_json(unit_file)
+        scores["biddeed_unit"] = score
+        scores["biddeed_integration"] = score  # Same run covers both files
+        print(f"  BidDeed unit: {score:.2%}")
     else:
-        # Missing artifact — warn but don't fail on first runs
-        scores[key] = None
-        print(f"  ⚠️ {key}: no artifact found")
+        scores["biddeed_unit"] = 0.0
+        scores["biddeed_integration"] = 0.0
+        print("  BidDeed unit: artifact not found")
 
-valid = [v for v in scores.values() if v is not None]
-overall = sum(valid)/len(valid) if valid else 0.0
-status = "pass" if not failures else "fail"
-ts = datetime.now(timezone.utc).isoformat()
+    # BidDeed DeepEval
+    deepeval_file = find_artifact("deepeval-results.json")
+    if deepeval_file:
+        score = parse_pytest_json(deepeval_file)
+        scores["biddeed_evals"] = score
+        print(f"  BidDeed DeepEval: {score:.2%}")
+    else:
+        scores["biddeed_evals"] = 1.0  # Skipped = not a failure
+        print("  BidDeed DeepEval: skipped (no API key)")
 
-report = {"status":status,"overall_score":overall,"scores":scores,"failures":failures,
-          "heal_required":bool(failures),"timestamp":ts,"run_url":GITHUB_RUN_URL}
+    # ZoneWise agents
+    agent_file = find_artifact("agent-results.json")
+    if agent_file:
+        score = parse_pytest_json(agent_file)
+        scores["zonewise_agent"] = score
+        print(f"  ZoneWise agents: {score:.2%}")
+    else:
+        scores["zonewise_agent"] = 0.0
+        print("  ZoneWise agents: artifact not found")
 
-json.dump(report, open("SENTINEL_REPORT.json","w"), indent=2)
-print(f"\n{'✅' if not failures else '❌'} Overall: {status.upper()} {overall*100:.0f}%")
-if failures:
-    for f2 in failures:
-        print(f"  ❌ {f2['layer']}: {f2['score']*100:.0f}% (need {f2['threshold']*100:.0f}%)")
+    # ZoneWise Playwright
+    pw_file = find_artifact("playwright-results.json")
+    if pw_file:
+        score = parse_playwright_json(pw_file)
+        scores["zonewise_e2e_pass_rate"] = score
+        print(f"  ZoneWise E2E: {score:.2%}")
+    else:
+        scores["zonewise_e2e_pass_rate"] = 0.0
+        print("  ZoneWise E2E: artifact not found")
 
-if SUPABASE_KEY:
-    import urllib.request
+    # Compute failures
+    for layer, threshold in THRESHOLDS.items():
+        score = scores.get(layer, 0.0)
+        if score < threshold:
+            failures.append({"layer": layer, "score": score, "threshold": threshold})
+
+    overall_score = sum(scores.values()) / len(scores) if scores else 0.0
+    status = "pass" if not failures else "fail"
+    heal_required = bool(failures)
+
+    details = {
+        "scores": scores,
+        "failures": failures,
+        "heal_required": heal_required,
+        "github_run_url": GITHUB_RUN_URL,
+    }
+
+    # Log to Supabase
     try:
-        payload = json.dumps({
+        supabase.table("insights").insert({
             "type": "qa_sentinel",
-            "insight_type": "qa_result",
-            "title": f"QA Pipeline — {status.upper()} {overall*100:.0f}%",
-            "description": f"BidDeed+ZoneWise nightly QA. Failures: {len(failures)}. Run: {GITHUB_RUN_URL}",
+            "platform": "biddeed+zonewise",
+            "layer": "all",
             "status": status,
-            "source": "qa-agentic-pipeline",
-            "confidence": overall,
-            "data": json.dumps(report)
-        }).encode()
-        req = urllib.request.Request(
-            f"{SUPABASE_URL}/rest/v1/insights", data=payload,
-            headers={"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}",
-                     "Content-Type":"application/json","Prefer":"return=minimal"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req) as r:
-            print(f"✅ Logged to Supabase ({r.status})")
+            "score": overall_score,
+            "details": json.dumps(details),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "healer_applied": False,
+        }).execute()
+        print(f"\n✅ Logged to Supabase — status={status} score={overall_score:.2%}")
     except Exception as e:
-        print(f"⚠️ Supabase log failed: {e}")
+        print(f"\n⚠️ Supabase log failed: {e}")
 
-exit(1 if failures else 0)
+    # Write SENTINEL_REPORT.json for healer
+    with open("SENTINEL_REPORT.json", "w") as f:
+        json.dump({"status": status, "score": overall_score, "failures": failures, "details": details}, f, indent=2)
+    print("✅ SENTINEL_REPORT.json written")
+
+    if failures:
+        print(f"\n❌ {len(failures)} layer(s) below threshold:")
+        for f in failures:
+            print(f"   {f['layer']}: {f['score']:.2%} (need {f['threshold']:.0%})")
+        sys.exit(1)
+    else:
+        print(f"\n✅ All layers passed — overall {overall_score:.2%}")
+
+if __name__ == "__main__":
+    main()
