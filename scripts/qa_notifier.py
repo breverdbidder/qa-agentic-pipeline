@@ -43,7 +43,7 @@ def get_latest_run() -> dict | None:
         if not rows:
             return None
         row = rows[0]
-        data = row.get("data") or row.get("details") or "{}"
+        data = row.get("data") or row.get("data") or "{}"
         if isinstance(data, str):
             data = json.loads(data)
         row["_parsed_data"] = data
