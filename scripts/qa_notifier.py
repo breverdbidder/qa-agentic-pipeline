@@ -1,3 +1,4 @@
+import json
 #!/usr/bin/env python3
 """
 qa_notifier.py — QA Pipeline Telegram Reporter
@@ -43,7 +44,7 @@ def get_latest_sentinel_run() -> Optional[dict]:
     )
     if result.data:
         row = result.data[0]
-        row["details"] = json.loads(row["details"]) if isinstance(row["details"], str) else row["details"]
+        row["details"] = json.loads(row.get("data", "{}")) if isinstance(row.get("data"), str) else (row.get("data") or {})
         return row
     return None
 
@@ -109,7 +110,7 @@ def format_layer_results(details: dict) -> str:
 
 def build_nightly_report(run: dict) -> str:
     """Build the nightly summary Telegram message."""
-    details = run.get("details", {})
+    details = json.loads(run.get("data", "{}")) if isinstance(run.get("data"), str) else (run.get("data") or {})
     status = run.get("status", "unknown").upper()
     score = run.get("score", 0.0)
     timestamp = run.get("timestamp", "")
