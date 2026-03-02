@@ -37,13 +37,13 @@ def get_latest_sentinel_run() -> Optional[dict]:
         supabase.table("insights")
         .select("*")
         .eq("type", "qa_sentinel")
-        .order("created_at", desc=True)
+        .order("timestamp", desc=True)
         .limit(1)
         .execute()
     )
     if result.data:
         row = result.data[0]
-        row["details"] = json.loads(row.get("data", row.get("details", "{}"))) if isinstance(row.get("data", row.get("details")), str) else row.get("data", row.get("details", {}))
+        row["details"] = json.loads(row["details"]) if isinstance(row["details"], str) else row["details"]
         return row
     return None
 
@@ -55,8 +55,8 @@ def get_recent_runs(hours: int = 24) -> list:
         supabase.table("insights")
         .select("*")
         .eq("type", "qa_sentinel")
-        .gte("created_at", since)
-        .order("created_at", desc=True)
+        .gte("timestamp", since)
+        .order("timestamp", desc=True)
         .execute()
     )
     return result.data or []
