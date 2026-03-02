@@ -1,0 +1,90 @@
+name: QA Deploy Monitor + Telegram Alert
+
+on:
+  # Triggered after nightly-qa.yml completes
+  workflow_run:
+    workflows: ["Nightly QA Pipeline — BidDeed + ZoneWise"]
+    types: [completed]
+  # Also triggered after any push to covered repos
+  repository_dispatch:
+    types: [deploy-complete]
+  # Manual trigger for status check
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Report mode (nightly|status|critical)'
+        required: false
+        default: 'status'
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  notify-telegram:
+    name: Send QA Report to Telegram
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install supabase requests --break-system-packages
+
+      - name: Determine report mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            echo "mode=nightly" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.inputs.mode }}" != "" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+          else
+            echo "mode=status" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Telegram report
+        run: python scripts/qa_notifier.py ${{ steps.mode.outputs.mode }}
+
+  smoke-test-endpoints:
+    name: Live Endpoint Smoke Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'repository_dispatch'
+    timeout-minutes: 10
+    steps:
+      - name: Test ZoneWise agents health
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://zonewise-agents.onrender.com/health)
+          echo "ZoneWise agents: $STATUS"
+          [ "$STATUS" == "200" ] || exit 1
+
+      - name: Test ZoneWise web
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://zonewise.ai)
+          echo "ZoneWise web: $STATUS"
+          [ "$STATUS" == "200" ] || exit 1
+
+      - name: Alert on smoke test failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 -c "
+          import os, requests
+          requests.post(
+            f'https://api.telegram.org/bot{os.environ[\"TELEGRAM_BOT_TOKEN\"]}/sendMessage',
+            json={
+              'chat_id': os.environ['TELEGRAM_CHAT_ID'],
+              'text': '🔴 *SMOKE TEST FAILED*\nLive endpoints down after deployment.\n[Check GitHub](${{ github.server_url }}/${{ github.repository }}/actions)',
+              'parse_mode': 'Markdown'
+            }
+          )
+          "
