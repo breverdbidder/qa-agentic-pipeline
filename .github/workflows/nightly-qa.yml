@@ -9,10 +9,9 @@ env:
   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
   SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
   SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   GH_TOKEN: ${{ secrets.GH_TOKEN }}
-  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
   ZONEWISE_AGENTS_URL: https://zonewise-agents.onrender.com
   ZONEWISE_WEB_URL: https://zonewise.ai
 
@@ -31,7 +30,6 @@ jobs:
       - name: Clone biddeed repo
         run: |
           git clone https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/breverdbidder/biddeed-conversational-ai.git biddeed
-          mkdir -p biddeed/tests
           cp tests/biddeed/test_bid_logic.py biddeed/tests/
           cp tests/biddeed/test_agent_integration.py biddeed/tests/
       - name: Run unit tests
@@ -40,7 +38,8 @@ jobs:
           python -m pytest tests/test_bid_logic.py tests/test_agent_integration.py \
             -v --json-report --json-report-file=unit-results.json \
             --tb=short || true
-      - uses: actions/upload-artifact@v4
+      - name: Upload results
+        uses: actions/upload-artifact@v4
         with:
           name: biddeed-unit-results
           path: biddeed/unit-results.json
@@ -59,18 +58,20 @@ jobs:
       - name: Clone biddeed repo
         run: |
           git clone https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/breverdbidder/biddeed-conversational-ai.git biddeed
-          mkdir -p biddeed/tests
           cp tests/biddeed/test_deepeval_evals.py biddeed/tests/
       - name: Run DeepEval tests
         working-directory: biddeed
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DEEPEVAL_TELEMETRY_OPT_OUT: "YES"
+          DEEPEVAL_MODEL: "claude-sonnet-4-20250514"
         run: |
           python -m pytest tests/test_deepeval_evals.py \
             -v --json-report --json-report-file=deepeval-results.json \
             --tb=short || true
-      - uses: actions/upload-artifact@v4
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: biddeed-deepeval-results
           path: biddeed/deepeval-results.json
@@ -85,20 +86,30 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install deps
-        run: pip install pytest pytest-json-report httpx supabase --break-system-packages
-      - name: Copy and run agent tests
+        run: pip install pytest pytest-json-report httpx --break-system-packages
+      - name: Clone zonewise-agents repo
+        run: |
+          git clone https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/breverdbidder/zonewise-agents.git zagents
+          cp tests/zonewise_agents/test_agent_health.py zagents/tests/
+          cp tests/zonewise_agents/test_langgraph_trajectory.py zagents/tests/
+      - name: Warm up Render (prevent cold start failures)
+        run: |
+          curl -sf https://zonewise-agents.onrender.com/health --max-time 30 || \
+          (echo "Warming up..." && sleep 30 && curl -sf https://zonewise-agents.onrender.com/health --max-time 30) || \
+          echo "Service may be cold — tests will handle timeouts"
+      - name: Run agent tests
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          mkdir -p agent_tests
-          cp tests/zonewise_agents/test_agent_health.py agent_tests/
-          cp tests/zonewise_agents/test_langgraph_trajectory.py agent_tests/
-          python -m pytest agent_tests/ \
+          python -m pytest zagents/tests/ \
             -v --json-report --json-report-file=agent-results.json \
             --tb=short || true
-      - uses: actions/upload-artifact@v4
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: zonewise-agent-results
           path: agent-results.json
@@ -123,7 +134,9 @@ jobs:
           cp tests/zonewise_web/playwright.config.ts .
       - name: Run Playwright tests
         run: npx playwright test --config=playwright.config.ts || true
-      - uses: actions/upload-artifact@v4
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: zonewise-playwright-results
           path: playwright-results.json
@@ -146,22 +159,31 @@ jobs:
           path: artifacts/
       - name: Aggregate results + log to Supabase
         id: aggregate
-        continue-on-error: true   # ← CRITICAL: don't block Telegram send
         env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: python scripts/aggregate_results.py
+        run: python scripts/aggregate_results.py || echo "FAILURES_FOUND=true" >> $GITHUB_ENV
       - name: Send Telegram report
-        # ALWAYS runs — regardless of aggregate pass/fail
+        if: always()
         env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python scripts/qa_notifier.py nightly
-      - name: Open issue on repeated failure
-        if: steps.aggregate.outcome == 'failure'
+      - name: Open issue on critical failure
+        if: env.FAILURES_FOUND == 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           gh issue create \
-            --title "🚨 QA Pipeline Failure $(date +'%Y-%m-%d')" \
-            --body "Nightly QA failed. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --title "🚨 QA Failure $(date +'%Y-%m-%d')" \
+            --body "Pipeline below threshold. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --label "qa-critical,ariel-review" \
             --repo breverdbidder/qa-agentic-pipeline || true
+      - name: Fail job if thresholds breached
+        if: env.FAILURES_FOUND == 'true'
+        run: exit 1
